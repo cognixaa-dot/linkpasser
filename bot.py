@@ -1,101 +1,113 @@
 import os
 import time
-import uuid
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-import re
 import requests
+import telebot
+from flask import Flask
+from threading import Thread
 
-# Simulated internal tracking for user keys
-user_access = {} 
-# In-memory session bypass tokens (Valid for 24 hours)
-# Format: {user_id: expiration_timestamp}
+# 1. Setup Bot Configurations
+TOKEN = os.getenv("BOT_TOKEN")
+# Make sure your website link includes your custom key at the very end
+KEY_URL = os.getenv("KEY_GENERATOR_URL", "https://google.com")
+bot = telebot.TeleBot(TOKEN)
 
-# --- CONFIGURATION (Loaded from Render Environment Variables later) ---
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-KEY_GENERATOR_URL = os.getenv("KEY_GENERATOR_URL", "https://google.com") 
-# ^ Change this to your ShrinkEarn/GPLinks custom alias link later!
+# Simple tracking dictionary: { user_id: expiry_timestamp }
+user_keys = {}
 
-# Hardcoded text string for the universal key system
-DAILY_SECRET_KEY = "VALID_KEY_2026" 
+# 2. Flask Setup to bypass Render's free tier sleep shutdown
+app = Flask('')
 
-def is_user_valid(user_id):
-    """Check if user has an unexpired 24 hour key session"""
-    if user_id in user_access:
-        if time.time() < user_access[user_id]:
-            return True
-    return False
+@app.route('/')
+def home():
+    return "Bot is running 24/7!"
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def run():
+    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 8080)))
+
+# 3. Telegram Bot Handlers
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
     welcome_text = (
-        "👋 **Welcome to the Ultimate Direct Bypasser Bot!**\n\n"
-        "Drop any shortener link here, and I will instantly extract the destination link for you without any forced ads or channel joins!\n\n"
-        "🔑 **Access System:** To maintain server costs, you need to generate an access key once every 24 hours.\n"
-        "Use /getkey to get your link, or paste your key here directly to unlock!"
+        "👋 **Welcome to the Premium Link Bypasser!**\n\n"
+        "To get free 24-hour ad-free bypassing access, you need a key.\n"
+        "👉 Type `/getkey` to generate your access token!\n\n"
+        "Once you have it, simply type:\n`/verify YOUR_KEY`"
     )
-    await update.message.reply_text(welcome_text, parse_mode="Markdown")
+    bot.reply_to(message, welcome_text, parse_mode="Markdown")
 
-async def get_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    instructions = (
-        "🔗 **Click the link below to get your 24-Hour Key:**\n"
-        f"{KEY_GENERATOR_URL}\n\n"
-        "Complete the shortener page, copy the text key, and paste it directly into this chat!"
+@bot.message_handler(commands=['getkey'])
+def provide_key_link(message):
+    msg = (
+        "🔑 **Get Your 24-Hour Pass**\n\n"
+        f"Click the link below, complete the captcha step, and copy the final key text:\n\n"
+        f"🔗 [CLICK HERE TO GENERATE KEY]({KEY_URL})\n\n"
+        "After getting the key, send it here like this:\n`/verify VALIDKEY`"
     )
-    await update.message.reply_text(instructions, parse_mode="Markdown")
+    bot.reply_to(message, msg, parse_mode="Markdown", disable_web_page_preview=True)
 
-def bypass_link_logic(url):
-    """Simplistic fallback bypass handler for presentation"""
+@bot.message_handler(commands=['verify'])
+def verify_user_key(message):
     try:
-        # Basic protection/resolution pattern
-        response = requests.get(url, allow_redirects=True, timeout=10)
-        return response.url
-    except Exception:
-        return "Could not resolve link automatically. Make sure it is a valid URL."
-
-async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    user_text = update.message.text.strip()
-
-    # Case A: User is typing the secret key to unlock access
-    if user_text == DAILY_SECRET_KEY:
-        user_access[user_id] = time.time() + 86400  # 24 Hours in seconds
-        await update.message.reply_text("✅ **Key Activated!** You now have unrestricted ad-free bypassing access for the next 24 hours!")
+        user_input = message.text.split(" ", 1)[1].strip()
+    except IndexError:
+        bot.reply_to(message, "❌ Please provide the key! Example: `/verify VALIDKEY`")
         return
 
-    # Case B: User tries to send a link but isn't authenticated yet
-    if not is_user_valid(user_id):
-        lockout_msg = (
-            "⚠️ **Access Denied!** Your 24-hour key is either missing or expired.\n\n"
-            "👉 Type /getkey to instantly generate your free 24-hour token key."
-        )
-        await update.message.reply_text(lockout_msg, parse_mode="Markdown")
+    # Check if they pasted the correct text matching your shortener's final page setup
+    if user_input == "VALIDKEY":
+        user_id = message.from_user.id
+        # Add exactly 24 hours of uptime access to this user ID
+        user_keys[user_id] = time.time() + (24 * 3600)
+        bot.reply_to(message, "✅ **Key Verified!** You have full bypassing access for the next 24 hours. Send me your links now!")
+    else:
+        bot.reply_to(message, "❌ **Invalid Key!** Please get a valid key using the `/getkey` command.")
+
+@bot.message_handler(func=lambda message: True)
+def handle_links(message):
+    user_id = message.from_user.id
+    current_time = time.time()
+
+    # Verify if user has an active 24-hour session
+    if user_id not in user_keys or current_time > user_keys[user_id]:
+        bot.reply_to(message, "🔒 **Access Expired or Restricted!**\n\nYou need a valid 24-hour access key.\nUse `/getkey` to get one instantly for free.")
         return
 
-    # Case C: Valid authenticated user sends a link to bypass
-    urls = re.findall(r'(https?://[^\s]+)', user_text)
-    if not urls:
-        await update.message.reply_text("Please send a valid HTTP/HTTPS link to bypass.")
+    incoming_url = message.text.strip()
+    if not incoming_url.startswith(("http://", "https://")):
+        bot.reply_to(message, "🤖 Please send a valid link starting with http:// or https://")
         return
 
-    await update.message.reply_text("🔄 *Bypassing your link... please wait...*", parse_mode="Markdown")
+    status_msg = bot.reply_to(message, "⚡ *Bypassing your link... Please wait...*", parse_mode="Markdown")
     
-    bypassed_url = bypass_link_logic(urls[0])
-    await update.message.reply_text(f"💚 **Bypassed Destination Link:**\n\n{bypassed_url}")
+    try:
+        # Utilizing an open-source public bypass API structure
+        api_endpoint = f"https://bypass.pm/api/bypass?url={incoming_url}"
+        response = requests.get(api_endpoint, timeout=15)
+        data = response.json()
 
-def main():
-    if not BOT_TOKEN:
-        print("Error: No BOT_TOKEN found in environment variables.")
-        return
+        if data.get("status") == "success" or "destination" in data:
+            final_link = data.get("destination") or data.get("bypassed_url")
+            bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=status_msg.message_id,
+                text=f"✅ **Bypassed Successfully!**\n\n🔗 **Original Link:** {final_link}",
+                parse_mode="Markdown"
+            )
+        else:
+            bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=status_msg.message_id,
+                text="❌ Could not bypass this link automatically. Make sure it is a supported ad-shortener link!"
+            )
+    except Exception as e:
+        bot.edit_message_text(
+            chat_id=message.chat.id,
+            message_id=status_msg.message_id,
+            text="⚠️ An error occurred while processing your request. Please try again later."
+        )
 
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("getkey", get_key_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_messages))
-
-    # Run the bot using built-in webhook/polling framework
-    print("Bot is running perfectly...")
-    application.run_polling()
-
-if __name__ == '__main__':
-    main()
+# Start webserver and bot polling
+if __name__ == "__main__":
+    t = Thread(target=run)
+    t.start()
+    bot.infinity_polling()
